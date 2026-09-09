@@ -1,11 +1,15 @@
 {
   "name": "blackjack-kalkulator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Blackjack - kalkulator szans (wersja desktopowa)",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --publish=never"
+    "dist": "electron-builder --publish=never",
+    "release": "electron-builder --publish=always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^31.0.0",
@@ -17,6 +21,11 @@
     "files": ["main.js", "index.html"],
     "win": { "target": "nsis" },
     "mac": { "target": "dmg" },
-    "linux": { "target": "AppImage" }
+    "linux": { "target": "AppImage" },
+    "publish": {
+      "provider": "github",
+      "owner": "adampuc99",
+      "repo": "blackdesktop"
+    }
   }
 }

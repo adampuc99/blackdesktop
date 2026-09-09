@@ -25,7 +25,39 @@
     "publish": {
       "provider": "github",
       "owner": "adampuc99",
-      "repo": "blackdesktop"
+      "repo": "blackdesktop",
+      "releaseType": "release"
+    }
+  }
+}{
+  "name": "blackjack-kalkulator",
+  "version": "1.0.1",
+  "description": "Blackjack - kalkulator szans (wersja desktopowa)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --publish=never",
+    "release": "electron-builder --publish=always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "pl.local.blackjackkalkulator",
+    "productName": "Blackjack Kalkulator",
+    "files": ["main.js", "index.html"],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" },
+    "publish": {
+      "provider": "github",
+      "owner": "adampuc99",
+      "repo": "blackdesktop",
+      "releaseType": "release"
     }
   }
 }

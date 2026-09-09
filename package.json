@@ -1,0 +1,22 @@
+{
+  "name": "blackjack-kalkulator",
+  "version": "1.0.0",
+  "description": "Blackjack - kalkulator szans (wersja desktopowa)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "pl.local.blackjackkalkulator",
+    "productName": "Blackjack Kalkulator",
+    "files": ["main.js", "index.html"],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg" },
+    "linux": { "target": "AppImage" }
+  }
+}

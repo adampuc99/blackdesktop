@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8" />
+<title>Blackjack — kalkulator szans</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>html,body{margin:0;background:#0B3D2E;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+
+// ---------- Karty i wartości ----------
+const RANK_ORDER = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"];
+const SUITS = ["♠", "♥", "♦", "♣"];
+const CATEGORIES = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "A"]; // grupy wartości używane w matematyce
+
+function categoryOf(rank) {
+  return rank === "J" || rank === "Q" || rank === "K" ? "10" : rank;
+}
+function categoryValue(cat) {
+  return cat === "A" ? 11 : cat === "10" ? 10 : parseInt(cat, 10);
+}
+function hiLoValue(rank) {
+  if (["2", "3", "4", "5", "6"].includes(rank)) return 1;
+  if (["7", "8", "9"].includes(rank)) return 0;
+  return -1;
+}
+
+function initialFineShoe(decks) {
+  const s = {};
+  RANK_ORDER.forEach((r) => SUITS.forEach((su) => (s[r + su] = decks)));
+  return s;
+}
+function totalFine(fineShoe) {
+  return Object.values(fineShoe).reduce((a, b) => a + b, 0);
+}
+function aggregate(fineShoe) {
+  const agg = {};
+  CATEGORIES.forEach((c) => (agg[c] = 0));
+  RANK_ORDER.forEach((r) => {
+    const cat = categoryOf(r);
+    SUITS.forEach((su) => (agg[cat] += fineShoe[r + su] || 0));
+  });
+  return agg;
+}
+function runningCountOf(fineShoe, decks) {
+  let rc = 0;
+  RANK_ORDER.forEach((r) => {
+    const initialCount = decks * 4;
+    let remaining = 0;
+    SUITS.forEach((su) => (remaining += fineShoe[r + su] || 0));
+    rc += hiLoValue(r) * (initialCount - remaining);
+  });
+  return rc;
+}
+
+function addCardCat(state, cat) {
+  let { total, softAces } = state;
+  const v = categoryValue(cat);
+  total += v;
+  if (v === 11) softAces += 1;
+  while (total > 21 && softAces > 0) {
+    total -= 10;
+    softAces -= 1;
+  }
+  return { total, softAces };
+}
+function handFromRanks(ranks) {
+  let state = { total: 0, softAces: 0 };
+  ranks.forEach((r) => (state = addCardCat(state, categoryOf(r))));
+  return state;
+}
+function aggKeyStr(agg) {
+  return CATEGORIES.map((c) => agg[c]).join(",");
+}
+function aggTotal(agg) {
+  return CATEGORIES.reduce((sum, c) => sum + (agg[c] || 0), 0);
+}
+
+function dealerDistribution(agg, total, softAces, memo) {
+  const key = aggKeyStr(agg) + "|" + total + "|" + softAces;
+  if (memo.has(key)) return memo.get(key);
+  let result;
+  if (total > 21) {
+    result = { bust: 1 };
+  } else if (total >= 17) {
+    result = {};
+    result[String(total)] = 1;
+  } else {
+    const tot = aggTotal(agg);
+    if (tot === 0) {
+      result = {};
+      result[total >= 17 ? String(total) : "bust"] = 1;
+    } else {
+      result = { bust: 0, "17": 0, "18": 0, "19": 0, "20": 0, "21": 0 };
+      for (const c of CATEGORIES) {
+        const cnt = agg[c];
+        if (!cnt) continue;
+        const p = cnt / tot;
+        const newAgg = { ...agg, [c]: cnt - 1 };
+        const ns = addCardCat({ total, softAces }, c);
+        const sub = dealerDistribution(newAgg, ns.total, ns.softAces, memo);
+        for (const k in sub) result[k] = (result[k] || 0) + p * sub[k];
+      }
+    }
+  }
+  memo.set(key, result);
+  return result;
+}
+function standEV(playerTotal, dealerDist) {
+  let ev = 0;
+  for (const k in dealerDist) {
+    const p = dealerDist[k];
+    if (k === "bust") ev += p * 1;
+    else {
+      const d = parseInt(k, 10);
+      if (playerTotal > d) ev += p * 1;
+      else if (playerTotal === d) ev += p * 0;
+      else ev += p * -1;
+    }
+  }
+  return ev;
+}
+function bestHandEV(total, softAces, agg, dealerDist, memo) {
+  if (total > 21) return -1;
+  const key = aggKeyStr(agg) + "|" + total + "|" + softAces;
+  if (memo.has(key)) return memo.get(key);
+  const stand = standEV(total, dealerDist);
+  const tot = aggTotal(agg);
+  let hit = -1;
+  if (tot > 0) {
+    hit = 0;
+    for (const c of CATEGORIES) {
+      const cnt = agg[c];
+      if (!cnt) continue;
+      const p = cnt / tot;
+      const newAgg = { ...agg, [c]: cnt - 1 };
+      const ns = addCardCat({ total, softAces }, c);
+      hit += p * bestHandEV(ns.total, ns.softAces, newAgg, dealerDist, memo);
+    }
+  }
+  const best = Math.max(stand, hit);
+  memo.set(key, best);
+  return best;
+}
+function hitEVOnce(total, softAces, agg, dealerDist, memo) {
+  const tot = aggTotal(agg);
+  if (tot === 0 || total >= 21) return -1;
+  let ev = 0;
+  for (const c of CATEGORIES) {
+    const cnt = agg[c];
+    if (!cnt) continue;
+    const p = cnt / tot;
+    const newAgg = { ...agg, [c]: cnt - 1 };
+    const ns = addCardCat({ total, softAces }, c);
+    const val = ns.total > 21 ? -1 : bestHandEV(ns.total, ns.softAces, newAgg, dealerDist, memo);
+    ev += p * val;
+  }
+  return ev;
+}
+function doubleEV(total, softAces, agg, dealerDist) {
+  const tot = aggTotal(agg);
+  if (tot === 0) return null;
+  let ev = 0;
+  for (const c of CATEGORIES) {
+    const cnt = agg[c];
+    if (!cnt) continue;
+    const p = cnt / tot;
+    const ns = addCardCat({ total, softAces }, c);
+    const outcome = ns.total > 21 ? -1 : standEV(ns.total, dealerDist);
+    ev += p * outcome;
+  }
+  return ev * 2;
+}
+function splitEV(pairCat, agg, dealerDist, memo) {
+  const tot = aggTotal(agg);
+  if (tot === 0) return null;
+  const base = pairCat === "A" ? { total: 11, softAces: 1 } : { total: categoryValue(pairCat), softAces: 0 };
+  let ev = 0;
+  for (const c of CATEGORIES) {
+    const cnt = agg[c];
+    if (!cnt) continue;
+    const p = cnt / tot;
+    const newAgg = { ...agg, [c]: cnt - 1 };
+    const ns = addCardCat(base, c);
+    const val = ns.total > 21 ? -1 : bestHandEV(ns.total, ns.softAces, newAgg, dealerDist, memo);
+    ev += p * val;
+  }
+  return ev * 2;
+}
+function computeAll(dealerUpRank, playerRanks, agg) {
+  if (!dealerUpRank || playerRanks.length < 2) return null;
+  const dealerUpCat = categoryOf(dealerUpRank);
+  const dealerStart = addCardCat({ total: 0, softAces: 0 }, dealerUpCat);
+  const dealerMemo = new Map();
+  const dealerDist = dealerDistribution(agg, dealerStart.total, dealerStart.softAces, dealerMemo);
+  const playerState = handFromRanks(playerRanks);
+  const memo = new Map();
+
+  const isBlackjack = playerRanks.length === 2 && playerState.total === 21;
+  const standE = playerState.total > 21 ? -1 : standEV(playerState.total, dealerDist);
+  const hitE = playerState.total >= 21 ? -1 : hitEVOnce(playerState.total, playerState.softAces, agg, dealerDist, memo);
+  const canDouble = playerRanks.length === 2 && playerState.total < 21;
+  const doubleE = canDouble ? doubleEV(playerState.total, playerState.softAces, agg, dealerDist) : null;
+  const isPair = playerRanks.length === 2 && categoryOf(playerRanks[0]) === categoryOf(playerRanks[1]);
+  const splitE = isPair ? splitEV(categoryOf(playerRanks[0]), agg, dealerDist, memo) : null;
+
+  return { dealerDist, standE, hitE, doubleE, splitE, isPair, isBlackjack, playerTotal: playerState.total, playerSoft: playerState.softAces > 0 };
+}
+
+function fmt(ev) {
+  if (ev === null || ev === undefined || Number.isNaN(ev)) return "—";
+  return (ev >= 0 ? "+" : "") + (ev * 100).toFixed(1) + "%";
+}
+function fmtMoney(v) {
+  return v.toFixed(2) + " zł";
+}
+
+const COLORS = {
+  felt: "#0B3D2E",
+  feltPanel: "#0E4433",
+  gold: "#C9A227",
+  goldSoft: "#8A7A3F",
+  text: "#F1EDE4",
+  textMuted: "#9FB8AC",
+  danger: "#C1443C",
+  win: "#5FA37A",
+};
+
+function InfoDot({ text }) {
+  return <span title={text} style={styles.infoDot}>ⓘ</span>;
+}
+
+function CardLabel({ card, onClick }) {
+  const red = card.suit === "♥" || card.suit === "♦";
+  return (
+    <button onClick={onClick} title="kliknij, aby usunąć" style={{ ...styles.miniCard, color: red ? "#7A2620" : COLORS.felt }}>
+      {card.rank}{card.suit}
+    </button>
+  );
+}
+
+function RankButton({ rank, onClick, disabled, active }) {
+  return (
+    <button className="bj-chip" disabled={disabled} onClick={onClick} style={{ ...styles.rankChip, ...(active ? styles.rankChipActive : {}), ...(disabled ? styles.chipDisabled : {}) }}>
+      {rank}
+    </button>
+  );
+}
+function SuitButton({ suit, onClick, disabled }) {
+  const red = suit === "♥" || suit === "♦";
+  return (
+    <button className="bj-chip" disabled={disabled} onClick={onClick} style={{ ...styles.suitChip, color: red ? "#D9695F" : COLORS.text, ...(disabled ? styles.chipDisabled : {}) }}>
+      {suit}
+    </button>
+  );
+}
+function CardPicker({ fineShoe, pendingRank, setPendingRank, onPick }) {
+  return (
+    <div>
+      <div style={styles.rankRow}>
+        {RANK_ORDER.map((r) => {
+          const available = SUITS.some((su) => (fineShoe[r + su] || 0) > 0);
+          return (
+            <RankButton key={r} rank={r} disabled={!available} active={pendingRank === r} onClick={() => setPendingRank(pendingRank === r ? null : r)} />
+          );
+        })}
+      </div>
+      <div style={styles.suitRow}>
+        {pendingRank ? (
+          SUITS.map((su) => {
+            const cnt = fineShoe[pendingRank + su] || 0;
+            return (
+              <SuitButton
+                key={su}
+                suit={su}
+                disabled={cnt === 0}
+                onClick={() => {
+                  onPick(pendingRank, su);
+                  setPendingRank(null);
+                }}
+              />
+            );
+          })
+        ) : (
+          <span style={styles.helpTextInline}>wybierz rangę →</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BlackjackCalculator() {
+  const [numDecks, setNumDecks] = useState(8);
+  const [fineShoe, setFineShoe] = useState(initialFineShoe(8));
+  const [dealerCards, setDealerCards] = useState([]);
+  const [playerHands, setPlayerHands] = useState([[]]); // tablica rąk (druga powstaje przy splicie)
+  const [activeHandIndex, setActiveHandIndex] = useState(0);
+  const [otherCards, setOtherCards] = useState([]);
+  const [pendingDealerRank, setPendingDealerRank] = useState(null);
+  const [pendingPlayerRank, setPendingPlayerRank] = useState(null);
+  const [pendingOtherRank, setPendingOtherRank] = useState(null);
+  const [otherOpen, setOtherOpen] = useState(false);
+
+  const [initialBankroll, setInitialBankroll] = useState(25);
+  const [baseBet, setBaseBet] = useState(2);
+  const [bankroll, setBankroll] = useState(25);
+  const [strategy, setStrategy] = useState("flat");
+  const [martingaleBet, setMartingaleBet] = useState(2);
+  const [stakeOverride, setStakeOverride] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [estimatedDecksLeft, setEstimatedDecksLeft] = useState(null);
+
+  const totalInShoe = totalFine(fineShoe);
+  const totalStart = numDecks * 52;
+  const seenCount = totalStart - totalInShoe;
+
+  const runningCount = useMemo(() => runningCountOf(fineShoe, numDecks), [fineShoe, numDecks]);
+  const trackedDecksRemaining = totalInShoe / 52;
+  const rawAgg = useMemo(() => aggregate(fineShoe), [fineShoe]);
+  const effectiveAgg = useMemo(() => {
+    if (estimatedDecksLeft === null) return rawAgg;
+    const rawTotal = aggTotal(rawAgg);
+    if (rawTotal === 0) return rawAgg;
+    const factor = (estimatedDecksLeft * 52) / rawTotal;
+    const scaled = {};
+    CATEGORIES.forEach((c) => (scaled[c] = rawAgg[c] * factor));
+    return scaled;
+  }, [rawAgg, estimatedDecksLeft]);
+  const effectiveDecksRemaining = estimatedDecksLeft ?? trackedDecksRemaining;
+  const trueCount = effectiveDecksRemaining > 0.5 ? runningCount / effectiveDecksRemaining : runningCount;
+
+  function removeExact(rank, suit) {
+    setFineShoe((prev) => ({ ...prev, [rank + suit]: Math.max(0, (prev[rank + suit] || 0) - 1) }));
+  }
+  function returnExact(rank, suit) {
+    setFineShoe((prev) => ({ ...prev, [rank + suit]: (prev[rank + suit] || 0) + 1 }));
+  }
+
+  function addDealerCard(rank, suit) {
+    if (!fineShoe[rank + suit]) return;
+    removeExact(rank, suit);
+    setDealerCards((p) => [...p, { rank, suit }]);
+  }
+  function addPlayerCard(rank, suit) {
+    if (!fineShoe[rank + suit]) return;
+    removeExact(rank, suit);
+    setPlayerHands((hands) => hands.map((h, i) => (i === activeHandIndex ? [...h, { rank, suit }] : h)));
+  }
+  function addOtherCard(rank, suit) {
+    if (!fineShoe[rank + suit]) return;
+    removeExact(rank, suit);
+    setOtherCards((p) => [...p, { rank, suit }]);
+  }
+  function removeAt(list, setList, idx) {
+    const card = list[idx];
+    returnExact(card.rank, card.suit);
+    setList(list.filter((_, i) => i !== idx));
+  }
+  function removeFromHand(handIdx, cardIdx) {
+    const card = playerHands[handIdx][cardIdx];
+    returnExact(card.rank, card.suit);
+    setPlayerHands(playerHands.map((h, i) => (i === handIdx ? h.filter((_, j) => j !== cardIdx) : h)));
+  }
+  function performSplit() {
+    if (playerHands.length !== 1 || playerHands[0].length !== 2) return;
+    const [c1, c2] = playerHands[0];
+    if (categoryOf(c1.rank) !== categoryOf(c2.rank)) return;
+    setPlayerHands([[c1], [c2]]);
+    setActiveHandIndex(0);
+    setPendingPlayerRank(null);
+  }
+  function undoSplit() {
+    if (playerHands.length <= 1) return;
+    setPlayerHands([playerHands.flat()]);
+    setActiveHandIndex(0);
+  }
+
+  function newHand() {
+    setDealerCards([]);
+    setPlayerHands([[]]);
+    setActiveHandIndex(0);
+    setPendingDealerRank(null);
+    setPendingPlayerRank(null);
+    setStakeOverride(null);
+  }
+  function newShoe(decks) {
+    const d = decks || numDecks;
+    setNumDecks(d);
+    setFineShoe(initialFineShoe(d));
+    setDealerCards([]);
+    setPlayerHands([[]]);
+    setActiveHandIndex(0);
+    setOtherCards([]);
+    setPendingDealerRank(null);
+    setPendingPlayerRank(null);
+    setPendingOtherRank(null);
+    setStakeOverride(null);
+  }
+
+  const dealerRanks = dealerCards.map((c) => c.rank);
+  const activeHandCards = playerHands[activeHandIndex] || [];
+  const playerRanks = activeHandCards.map((c) => c.rank);
+  const dealerUpRank = dealerRanks[0] || null;
+  const result = useMemo(() => computeAll(dealerUpRank, playerRanks, effectiveAgg), [dealerUpRank, playerRanks, effectiveAgg]);
+  const playerState = useMemo(() => handFromRanks(playerRanks), [playerRanks]);
+  const isSplit = playerHands.length > 1;
+
+  const options = result
+    ? [
+        { key: "stand", label: "Stój", ev: result.standE, available: true },
+        { key: "hit", label: "Dobierz", ev: result.hitE, available: playerState.total < 21 },
+        { key: "double", label: "Podwój", ev: result.doubleE, available: result.doubleE !== null },
+        { key: "split", label: "Podziel", ev: result.splitE, available: result.isPair && result.splitE !== null && !isSplit },
+      ]
+    : [];
+  const bestKey = options.length
+    ? options.filter((o) => o.available && o.ev !== null).sort((a, b) => b.ev - a.ev)[0]?.key
+    : null;
+
+  let suggestedBet = baseBet;
+  if (strategy === "martingale") suggestedBet = martingaleBet;
+  else if (strategy === "count") suggestedBet = baseBet * Math.max(1, Math.min(6, Math.round(trueCount)));
+  const stake = stakeOverride ?? suggestedBet;
+
+  function recordHand(outcome) {
+    let delta = 0;
+    if (outcome === "win") delta = stake;
+    else if (outcome === "blackjack") delta = stake * 1.5;
+    else if (outcome === "lose") delta = -stake;
+    const newBankroll = bankroll + delta;
+    setBankroll(newBankroll);
+    setHistory((h) => [...h, { stake, outcome, bankroll: newBankroll }]);
+    if (strategy === "martingale") setMartingaleBet(outcome === "lose" ? stake * 2 : baseBet);
+    setStakeOverride(null);
+  }
+  function resetBudget() {
+    setBankroll(initialBankroll);
+    setHistory([]);
+    setMartingaleBet(baseBet);
+    setStakeOverride(null);
+  }
+
+  const sparkPoints = useMemo(() => {
+    const vals = [initialBankroll, ...history.map((h) => h.bankroll)];
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    const range = max - min || 1;
+    const w = 200, h = 34;
+    return vals.map((v, i) => `${((i / Math.max(1, vals.length - 1)) * w).toFixed(1)},${(h - ((v - min) / range) * h).toFixed(1)}`).join(" ");
+  }, [history, initialBankroll]);
+
+  const outcomeLabel = { win: "wygrana", blackjack: "blackjack", push: "push", lose: "przegrana" };
+
+  return (
+    <div style={styles.page}>
+      <style>{`
+        html, body { margin:0; padding:0; }
+        @media (max-width: 900px) {
+          .bj-cols { grid-template-columns: 1fr !important; height: auto !important; overflow: visible !important; }
+          .bj-page { height: auto !important; overflow: visible !important; }
+        }
+        @media (max-width: 640px) {
+          .bj-glossary-grid { grid-template-columns: 1fr !important; }
+        }
+        .bj-chip:hover:not(:disabled) { filter: brightness(1.2); }
+        .bj-chip:disabled { cursor: not-allowed; }
+        .bj-scroll::-webkit-scrollbar { width: 6px; }
+        .bj-scroll::-webkit-scrollbar-thumb { background: #8A7A3F; border-radius: 3px; }
+      `}</style>
+
+      <div style={styles.header}>
+        <span style={styles.headerTitle}>Blackjack</span>
+        <span style={styles.headerSub}>
+          {numDecks}× talia · pozostało {totalInShoe}/{totalStart}
+          {estimatedDecksLeft !== null ? ` · szacunek ${estimatedDecksLeft} talii` : ""} · RC {runningCount >= 0 ? "+" : ""}{runningCount} · TC {trueCount.toFixed(2)}
+        </span>
+      </div>
+
+      <div className="bj-cols" style={styles.cols}>
+        {/* KOLUMNA 1: wybór kart */}
+        <div style={styles.col}>
+          <div style={styles.rowTight}>
+            <span style={styles.label}>Talie</span>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[1, 2, 4, 6, 8].map((d) => (
+                <button key={d} onClick={() => newShoe(d)} style={{ ...styles.tinyBtn, ...(d === numDecks ? styles.tinyBtnActive : {}) }}>
+                  {d}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={styles.subLabel}>Krupier</div>
+          <CardPicker fineShoe={fineShoe} pendingRank={pendingDealerRank} setPendingRank={setPendingDealerRank} onPick={addDealerCard} />
+          <div style={styles.handCards}>
+            {dealerCards.map((c, i) => (
+              <CardLabel key={i} card={c} onClick={() => removeAt(dealerCards, setDealerCards, i)} />
+            ))}
+          </div>
+
+          <div style={styles.subLabel}>
+            Gracz{isSplit ? "" : playerRanks.length > 0 ? ` — suma ${playerState.total}${playerState.softAces > 0 ? " (miękka)" : ""}` : ""}
+          </div>
+          {isSplit && (
+            <div style={styles.handTabs}>
+              {playerHands.map((h, idx) => {
+                const st = handFromRanks(h.map((c) => c.rank));
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => setActiveHandIndex(idx)}
+                    style={{ ...styles.handTab, ...(activeHandIndex === idx ? styles.handTabActive : {}) }}
+                  >
+                    Ręka {idx + 1} ({st.total}{st.softAces > 0 ? "m" : ""})
+                  </button>
+                );
+              })}
+              <button onClick={undoSplit} style={styles.undoBtn} title="połącz ręce z powrotem w jedną">
+                cofnij split
+              </button>
+            </div>
+          )}
+          <CardPicker fineShoe={fineShoe} pendingRank={pendingPlayerRank} setPendingRank={setPendingPlayerRank} onPick={addPlayerCard} />
+          <div style={styles.handCards}>
+            {activeHandCards.map((c, i) => (
+              <CardLabel key={i} card={c} onClick={() => removeFromHand(activeHandIndex, i)} />
+            ))}
+          </div>
+
+          <button onClick={() => setOtherOpen((v) => !v)} style={styles.otherToggle}>
+            {otherOpen ? "▾" : "▸"} Inne widoczne karty {otherCards.length > 0 ? `(${otherCards.length})` : ""}
+          </button>
+          {otherOpen && (
+            <div>
+              <CardPicker fineShoe={fineShoe} pendingRank={pendingOtherRank} setPendingRank={setPendingOtherRank} onPick={addOtherCard} />
+              <div style={styles.handCards}>
+                {otherCards.map((c, i) => (
+                  <CardLabel key={i} card={c} onClick={() => removeAt(otherCards, setOtherCards, i)} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={styles.rowTight}>
+            <button onClick={newHand} style={styles.smallActionBtn}>Nowa ręka</button>
+            <button onClick={() => newShoe()} style={{ ...styles.smallActionBtn, borderColor: COLORS.danger, color: COLORS.danger }}>Nowa talia</button>
+          </div>
+
+          <div style={styles.rowTight}>
+            <span style={styles.label}>Zostało ok. <InfoDot text="Szacunek pozostałych talii, jeśli wiesz że w shoe zostało mniej niż wynika z tego co wpisałeś. Przelicza proporcjonalnie, zakładając przeciętny skład nieznanej części." /></span>
+            <input
+              type="number" step="0.25" min="0"
+              placeholder={trackedDecksRemaining.toFixed(2)}
+              value={estimatedDecksLeft ?? ""}
+              onChange={(e) => setEstimatedDecksLeft(e.target.value === "" ? null : parseFloat(e.target.value))}
+              style={styles.numInputSmall}
+            />
+            {estimatedDecksLeft !== null && (
+              <button onClick={() => setEstimatedDecksLeft(null)} style={styles.undoBtn}>x</button>
+            )}
+          </div>
+        </div>
+
+        {/* KOLUMNA 2: wyniki */}
+        <div style={styles.col}>
+          <div style={styles.panelTitle}>Rozkład krupiera</div>
+          {result ? (
+            ["bust", "17", "18", "19", "20", "21"].map((k) => {
+              const p = result.dealerDist[k] || 0;
+              return (
+                <div key={k} style={styles.distRow}>
+                  <div style={styles.distLabel}>{k === "bust" ? "fura" : k}</div>
+                  <div style={styles.distBarOuter}>
+                    <div style={{ ...styles.distBarInner, width: `${p * 100}%`, background: k === "bust" ? COLORS.win : COLORS.gold }} />
+                  </div>
+                  <div style={styles.distPct}>{(p * 100).toFixed(1)}%</div>
+                </div>
+              );
+            })
+          ) : (
+            <div style={styles.helpText}>Wybierz kartę krupiera i min. 2 karty gracza.</div>
+          )}
+
+          <div style={styles.divider} />
+          <div style={styles.panelTitle}>Decyzja</div>
+          {result && result.isBlackjack ? (
+            <div style={styles.blackjackBanner}>Blackjack! Wygrana 3:2.</div>
+          ) : result ? (
+            <div style={styles.decisionGrid}>
+              {options.map((o) => {
+                const isClickableSplit = o.key === "split" && o.available && o.ev !== null;
+                return (
+                  <div
+                    key={o.key}
+                    onClick={isClickableSplit ? performSplit : undefined}
+                    title={isClickableSplit ? "kliknij, aby podzielić rękę" : undefined}
+                    style={{
+                      ...styles.decisionCard,
+                      ...(o.available && o.ev !== null && o.key === bestKey ? styles.decisionCardBest : {}),
+                      opacity: o.available && o.ev !== null ? 1 : 0.35,
+                      cursor: isClickableSplit ? "pointer" : "default",
+                    }}
+                  >
+                    <div style={styles.decisionLabel}>{o.label}{isClickableSplit ? " ✂" : ""}</div>
+                    <div style={styles.decisionEV}>{o.available && o.ev !== null ? fmt(o.ev) : "—"}</div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={styles.helpText}>—</div>
+          )}
+          <div style={styles.footnote}>
+            EV na jednostkę zakładu. <InfoDot text="Rozkład krupiera liczony dla bieżącego stanu talii - nie jest przeliczany po każdej kolejnej karcie dobranej przez Ciebie. Split liczony w przybliżeniu (dwie ręce w przybliżeniu niezależnie)." />
+          </div>
+        </div>
+
+        {/* KOLUMNA 3: budżet */}
+        <div style={styles.col}>
+          <div style={styles.panelTitle}>Budżet</div>
+          <div style={styles.rowTight}>
+            <span style={styles.label}>Start</span>
+            <input type="number" value={initialBankroll} onChange={(e) => setInitialBankroll(parseFloat(e.target.value) || 0)} style={styles.numInputSmall} />
+            <span style={styles.label}>Stawka</span>
+            <input
+              type="number" value={baseBet}
+              onChange={(e) => { const v = parseFloat(e.target.value) || 0; setBaseBet(v); setMartingaleBet(v); }}
+              style={styles.numInputSmall}
+            />
+          </div>
+          <div style={styles.rowTight}>
+            <span style={styles.label}>Taktyka</span>
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} style={styles.select}>
+              <option value="flat">Stała</option>
+              <option value="martingale">Martingale</option>
+              <option value="count">Spread wg TC</option>
+            </select>
+            <InfoDot text="Stała: zawsze ta sama stawka. Martingale: podwaja po przegranej, nie zmienia przewagi kasyna, tylko przesuwa ryzyko. Spread wg TC: stawka rośnie z true count, do 6x bazowej." />
+          </div>
+
+          <div style={styles.bankrollRow}>
+            <span style={styles.bankrollBig}>{fmtMoney(bankroll)}</span>
+            <svg width="120" height="30"><polyline points={sparkPoints} fill="none" stroke={COLORS.gold} strokeWidth="1.5" /></svg>
+          </div>
+
+          <div style={styles.rowTight}>
+            <span style={styles.label}>Stawka na rękę {strategy === "count" ? `(TC ${trueCount.toFixed(2)} → ${suggestedBet.toFixed(2)} zł)` : ""}</span>
+            <input type="number" value={stake} onChange={(e) => setStakeOverride(parseFloat(e.target.value) || 0)} style={styles.numInputSmall} />
+            {stakeOverride !== null && (
+              <button onClick={() => setStakeOverride(null)} style={styles.undoBtn} title="wróć do sugerowanej stawki">auto</button>
+            )}
+          </div>
+          <div style={styles.decisionGrid}>
+            <button onClick={() => recordHand("win")} style={styles.outcomeBtnWin}>Wygrana</button>
+            <button onClick={() => recordHand("blackjack")} style={styles.outcomeBtnWin}>Blackjack</button>
+            <button onClick={() => recordHand("push")} style={styles.outcomeBtnPush}>Push</button>
+            <button onClick={() => recordHand("lose")} style={styles.outcomeBtnLose}>Przegrana</button>
+          </div>
+          {bankroll < baseBet && <div style={{ ...styles.blackjackBanner, borderColor: COLORS.danger, color: COLORS.danger, marginTop: 6 }}>Budżet poniżej stawki bazowej.</div>}
+          <button onClick={resetBudget} style={{ ...styles.smallActionBtn, marginTop: 6 }}>Reset budżetu</button>
+
+          {history.length > 0 && (
+            <div className="bj-scroll" style={styles.historyBox}>
+              {history.slice().reverse().map((h, i) => (
+                <div key={i} style={styles.historyRow}>
+                  <span>#{history.length - i}</span>
+                  <span>{fmtMoney(h.stake)}</span>
+                  <span>{outcomeLabel[h.outcome]}</span>
+                  <span>{fmtMoney(h.bankroll)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <details style={styles.glossary}>
+        <summary style={styles.glossarySummary}>Słowniczek pojęć (rozwiń, żeby pokazać komuś)</summary>
+        <div className="bj-glossary-grid" style={styles.glossaryGrid}>
+          <div><b style={styles.glossaryTerm}>Fura (bust)</b> — suma kart przekracza 21, automatyczna przegrana. Pasek "fura" w rozkładzie krupiera to szansa, że on się wysypie.</div>
+          <div><b style={styles.glossaryTerm}>Miękka ręka</b> — ręka z asem liczonym jako 11 (np. A+6 = miękkie 17). Bezpieczniejsza do dobierania, bo nie można się przebić jedną kartą.</div>
+          <div><b style={styles.glossaryTerm}>Stój / Dobierz</b> — kończysz turę z obecną sumą / bierzesz kolejną kartę.</div>
+          <div><b style={styles.glossaryTerm}>Podwój</b> — podwajasz stawkę, dobierasz dokładnie jedną kartę i musisz stanąć.</div>
+          <div><b style={styles.glossaryTerm}>Podziel (split)</b> — przy parze rozdzielasz na dwie osobne ręce, każda z własną stawką. Kliknięcie kafelka "Podziel ✂" w Decyzji faktycznie dzieli rękę w aplikacji - dostajesz zakładki "Ręka 1" / "Ręka 2" i grasz każdą osobno.</div>
+          <div><b style={styles.glossaryTerm}>EV (expected value)</b> — oczekiwany zwrot z decyzji na jednostkę zakładu. +10% znaczy: średnio zyskujesz 10% stawki na tej decyzji w długim terminie.</div>
+          <div><b style={styles.glossaryTerm}>Running count (RC)</b> — bieżąca suma liczenia kart wg systemu Hi-Lo: karty 2-6 dają +1, 7-9 dają 0, 10-K-A dają -1. Rośnie, gdy w talii zostaje więcej wysokich kart.</div>
+          <div><b style={styles.glossaryTerm}>True count (TC)</b> — running count podzielony przez liczbę talii, które zostały w shoe. Normalizuje RC, żeby miał ten sam sens niezależnie od tego, ile kart zostało.</div>
+          <div><b style={styles.glossaryTerm}>Talia / shoe</b> — komplet kart w grze (tu: {numDecks}× 52). Penetracja to jak duża część shoe została już rozdana.</div>
+          <div><b style={styles.glossaryTerm}>Martingale</b> — podwajanie stawki po przegranej. Nie zmienia przewagi kasyna, tylko przesuwa ryzyko na rzadszą, ale znacznie większą stratę.</div>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+const styles = {
+  page: { background: COLORS.felt, color: COLORS.text, fontFamily: "Georgia, 'Iowan Old Style', serif", minHeight: "100vh", boxSizing: "border-box", display: "flex", flexDirection: "column", padding: "10px 14px" },
+  header: { display: "flex", alignItems: "baseline", gap: 12, marginBottom: 8, flexWrap: "wrap" },
+  headerTitle: { fontSize: 20, color: COLORS.gold },
+  headerSub: { fontFamily: "'SF Mono', 'IBM Plex Mono', monospace", fontSize: 11, color: COLORS.textMuted },
+  cols: { display: "grid", gridTemplateColumns: "1.05fr 1fr 0.95fr", gap: 14, flex: 1, minHeight: 0 },
+  col: { background: COLORS.feltPanel, border: `1px solid ${COLORS.goldSoft}`, borderRadius: 6, padding: 10, overflowY: "auto", minHeight: 0 },
+  panelTitle: { fontSize: 13, color: COLORS.gold, marginBottom: 6, fontWeight: "bold" },
+  label: { fontSize: 11.5, color: COLORS.textMuted, fontFamily: "'SF Mono', monospace" },
+  rowTight: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 6, flexWrap: "wrap" },
+  tinyBtn: { background: "transparent", border: `1px solid ${COLORS.goldSoft}`, color: COLORS.textMuted, borderRadius: 4, padding: "2px 7px", fontSize: 11, cursor: "pointer", fontFamily: "'SF Mono', monospace" },
+  tinyBtnActive: { background: COLORS.gold, color: COLORS.felt, borderColor: COLORS.gold },
+  targetTab: { flex: 1, background: "transparent", border: `1px solid ${COLORS.goldSoft}`, color: COLORS.textMuted, borderRadius: 4, padding: "6px 0", fontSize: 12, cursor: "pointer", fontFamily: "'SF Mono', monospace" },
+  subLabel: { fontSize: 11, color: COLORS.gold, fontFamily: "'SF Mono', monospace", margin: "4px 0 4px" },
+  handTabs: { display: "flex", gap: 4, alignItems: "center", marginBottom: 6, flexWrap: "wrap" },
+  handTab: { background: "transparent", border: `1px solid ${COLORS.goldSoft}`, color: COLORS.textMuted, borderRadius: 4, padding: "3px 8px", fontSize: 11, cursor: "pointer", fontFamily: "'SF Mono', monospace" },
+  handTabActive: { background: COLORS.gold, color: COLORS.felt, borderColor: COLORS.gold, fontWeight: "bold" },
+  otherToggle: { width: "100%", textAlign: "left", background: "transparent", border: "none", color: COLORS.textMuted, fontFamily: "'SF Mono', monospace", fontSize: 11.5, cursor: "pointer", padding: "6px 0", marginTop: 4 },
+  rankRow: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 },
+  suitRow: { display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", minHeight: 30, marginBottom: 10 },
+  rankChip: { minWidth: 32, height: 30, borderRadius: 5, border: `1px solid ${COLORS.gold}`, background: "transparent", color: COLORS.gold, fontFamily: "'SF Mono', 'IBM Plex Mono', monospace", fontSize: 12, cursor: "pointer", flex: "1 0 auto" },
+  rankChipActive: { background: COLORS.gold, color: COLORS.felt },
+  suitChip: { minWidth: 34, height: 30, borderRadius: 5, border: `1px solid ${COLORS.goldSoft}`, background: COLORS.felt, fontSize: 15, cursor: "pointer" },
+  chipDisabled: { opacity: 0.25, borderColor: COLORS.textMuted, color: COLORS.textMuted },
+  helpTextInline: { fontSize: 11, color: COLORS.textMuted, fontFamily: "'SF Mono', monospace" },
+  handsBlock: { marginBottom: 8 },
+  handRow: { display: "flex", gap: 6, alignItems: "flex-start", marginBottom: 4, minHeight: 22 },
+  handLabel: { fontSize: 11, color: COLORS.textMuted, fontFamily: "'SF Mono', monospace", width: 62, flexShrink: 0, paddingTop: 3 },
+  handCards: { display: "flex", flexWrap: "wrap", gap: 4, flex: 1 },
+  miniCard: { background: COLORS.gold, border: "none", borderRadius: 3, padding: "2px 6px", fontSize: 11, fontFamily: "'SF Mono', monospace", fontWeight: "bold", cursor: "pointer" },
+  smallActionBtn: { flex: 1, background: "transparent", border: `1px solid ${COLORS.goldSoft}`, color: COLORS.textMuted, borderRadius: 4, padding: "6px 0", cursor: "pointer", fontFamily: "'SF Mono', monospace", fontSize: 11 },
+  numInputSmall: { width: 60, background: COLORS.felt, border: `1px solid ${COLORS.goldSoft}`, color: COLORS.text, borderRadius: 4, padding: "3px 5px", fontFamily: "'SF Mono', monospace", fontSize: 12 },
+  select: { background: COLORS.felt, border: `1px solid ${COLORS.goldSoft}`, color: COLORS.text, borderRadius: 4, padding: "3px 5px", fontFamily: "'SF Mono', monospace", fontSize: 11 },
+  undoBtn: { background: "transparent", border: "none", color: COLORS.textMuted, fontSize: 12, cursor: "pointer", fontFamily: "'SF Mono', monospace" },
+  infoDot: { cursor: "help", color: COLORS.goldSoft, fontSize: 11 },
+  helpText: { fontSize: 11.5, color: COLORS.textMuted, lineHeight: 1.4 },
+  divider: { height: 1, background: COLORS.goldSoft, opacity: 0.3, margin: "10px 0" },
+  distRow: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 },
+  distLabel: { width: 30, fontSize: 11, color: COLORS.textMuted, fontFamily: "'SF Mono', monospace" },
+  distBarOuter: { flex: 1, height: 8, background: COLORS.felt, borderRadius: 3, overflow: "hidden" },
+  distBarInner: { height: "100%" },
+  distPct: { width: 40, fontSize: 11, textAlign: "right", fontFamily: "'SF Mono', monospace" },
+  decisionGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 },
+  decisionCard: { border: `1px solid ${COLORS.goldSoft}`, borderRadius: 5, padding: "7px 4px", textAlign: "center" },
+  decisionCardBest: { border: `2px solid ${COLORS.gold}`, background: "rgba(201,162,39,0.12)" },
+  decisionLabel: { fontSize: 11.5, color: COLORS.text },
+  decisionEV: { fontSize: 14, fontFamily: "'SF Mono', monospace", marginTop: 2, color: COLORS.gold },
+  blackjackBanner: { background: "rgba(201,162,39,0.15)", border: `1px solid ${COLORS.gold}`, borderRadius: 5, padding: 7, fontSize: 11.5, color: COLORS.gold },
+  footnote: { fontSize: 10.5, color: COLORS.textMuted, marginTop: 8, display: "flex", alignItems: "center", gap: 4 },
+  bankrollRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  bankrollBig: { fontSize: 24, color: COLORS.gold, fontFamily: "'SF Mono', monospace" },
+  outcomeBtnWin: { background: "transparent", border: `1px solid ${COLORS.win}`, color: COLORS.win, borderRadius: 5, padding: "6px 0", cursor: "pointer", fontFamily: "'SF Mono', monospace", fontSize: 11 },
+  outcomeBtnPush: { background: "transparent", border: `1px solid ${COLORS.textMuted}`, color: COLORS.textMuted, borderRadius: 5, padding: "6px 0", cursor: "pointer", fontFamily: "'SF Mono', monospace", fontSize: 11 },
+  outcomeBtnLose: { background: "transparent", border: `1px solid ${COLORS.danger}`, color: COLORS.danger, borderRadius: 5, padding: "6px 0", cursor: "pointer", fontFamily: "'SF Mono', monospace", fontSize: 11 },
+  historyBox: { marginTop: 8, maxHeight: 130, overflowY: "auto" },
+  historyRow: { display: "grid", gridTemplateColumns: "30px 55px 65px 1fr", gap: 4, fontSize: 10.5, color: COLORS.textMuted, fontFamily: "'SF Mono', monospace", padding: "2px 0", borderBottom: `1px solid ${COLORS.felt}` },
+  glossary: { marginTop: 12, background: COLORS.feltPanel, border: `1px solid ${COLORS.goldSoft}`, borderRadius: 6, padding: "10px 14px" },
+  glossarySummary: { cursor: "pointer", color: COLORS.gold, fontSize: 13, fontFamily: "'SF Mono', monospace" },
+  glossaryGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 20px", marginTop: 10, fontSize: 12, color: COLORS.textMuted, lineHeight: 1.5 },
+  glossaryTerm: { color: COLORS.text },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<BlackjackCalculator />);
+</script>
+</body>
+</html>
